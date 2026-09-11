@@ -1,14 +1,16 @@
 import { AsyncPipe, CurrencyPipe, DecimalPipe } from '@angular/common';
-import { Component, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { NgxChartsModule, ScaleType } from '@swimlane/ngx-charts';
 import { BehaviorSubject, catchError, combineLatest, map, of, shareReplay, switchMap } from 'rxjs';
 import { ApiService, Loan, Summary } from '../core/api.service';
 
 interface Metric { label:string; value:number; icon:string; tone:string; money?:boolean; suffix?:string; percentage?:number; note:string; }
+interface LoanTableView { filtered:Loan[]; page:Loan[]; totalPages:number; start:number; end:number; }
 
 @Component({
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [AsyncPipe, CurrencyPipe, DecimalPipe, FormsModule, NgxChartsModule],
   template: `
     @if(vm$|async; as vm){
@@ -108,20 +110,46 @@ export class DashboardComponent {
   loanFilter='ACTIVE';
   trendWindow:'MONTHLY'|'DAILY'='MONTHLY';
   loanSearch=''; loanPage=1; loanPageSize=10; loanSort:keyof Loan='investmentDate'; loanSortDirection:'asc'|'desc'='desc';
+  private tableCache?:{loans:Loan[];filter:string;search:string;page:number;pageSize:number;sort:keyof Loan;direction:'asc'|'desc';view:LoanTableView};
+  private trendCache?:{loans:Loan[];window:'MONTHLY'|'DAILY';value:{name:string;series:{name:string;value:number}[]}[]};
   readonly statusScheme={name:'status',selectable:true,group:ScaleType.Ordinal,domain:['#27bf91','#9b69dd','#ed5c68']};
   readonly amountScheme={name:'amount',selectable:true,group:ScaleType.Ordinal,domain:['#4167e8','#21b995','#ec5a68']};
   readonly trendScheme={name:'trend',selectable:true,group:ScaleType.Ordinal,domain:['#4267e8','#20b895','#9b6add']};
   readonly vm$=this.refresh.pipe(switchMap(()=>combineLatest({summary:this.api.summary().pipe(catchError(()=>of({investmentPrincipal:0,totalAmountLent:0,totalAmountReceived:0,interestEarned:0,interestPercentage:0,outstandingPrincipal:0,amountAvailableToInvest:0,principalLoss:0,principalLossPercentage:0,walletAdded:0,walletWithdrawn:0,bankReceived:0,activeLoans:0,closedLoans:0,npaLoans:0,npaAmount:0,npaPercentage:0,probableNpaLoans:0,probableNpaAmount:0,probableNpaPercentage:0,portfolioHealth:'Healthy' as const}))),loans:this.api.loans().pipe(catchError(()=>of([] as Loan[]))),profile:this.api.profile().pipe(catchError(()=>of({userId:0,username:'User',email:'',lenderId:null,investmentPrincipal:0})))})),map(({summary,loans,profile})=>({...this.buildView(summary,loans),profile})),shareReplay(1));
   private buildView(summary:Summary,loans:Loan[]){const totalLoans=summary.activeLoans+summary.closedLoans;const activeAmount=this.sum(loans.filter(x=>x.loanStatus==='ACTIVE'),x=>x.outstandingPrincipal);const closedAmount=this.sum(loans.filter(x=>x.loanStatus==='CLOSED'),x=>x.investedAmount);const npaAmount=this.sum(loans.filter(x=>x.npa),x=>x.outstandingPrincipal);const repaymentBase=summary.totalAmountReceived+summary.outstandingPrincipal;const repaymentRate=repaymentBase?summary.totalAmountReceived*100/repaymentBase:0;const activeRate=totalLoans?summary.activeLoans*100/totalLoans:0;return{summary,loans,totalLoans,repaymentRate,activeRate,healthLabel:summary.portfolioHealth,metrics:[{label:'Investment principal',value:summary.investmentPrincipal,money:true,icon:'capital',tone:'tone-blue',note:'YOUR CAPITAL'},{label:'Interest earned',value:summary.interestEarned,money:true,percentage:summary.interestPercentage,icon:'growth',tone:'tone-teal',note:'RETURN ON PRINCIPAL'},{label:'Active loans',value:summary.activeLoans,icon:'active',tone:'tone-cyan',note:`${activeRate.toFixed(0)}% OF TOTAL`},{label:'Available to invest',value:summary.amountAvailableToInvest,money:true,icon:'available',tone:'tone-violet',note:'PRINCIPAL + INTEREST − OUTSTANDING'},{label:'NPA count',value:summary.npaLoans,icon:'risk',tone:'tone-red',note:'REPORT NPA'},{label:'NPA amount',value:summary.npaAmount,money:true,percentage:summary.npaPercentage,icon:'risk-money',tone:'tone-red',note:'OF INVESTMENT PRINCIPAL'},{label:'Probable NPA count',value:summary.probableNpaLoans,icon:'warning',tone:'tone-amber',note:'35-DAY RULE'},{label:'Probable NPA amount',value:summary.probableNpaAmount,money:true,percentage:summary.probableNpaPercentage,icon:'warning-money',tone:'tone-amber',note:'OF INVESTMENT PRINCIPAL'},{label:'Total amount lent',value:summary.totalAmountLent,money:true,icon:'lent',tone:'tone-blue',note:'INCLUDES RE-LENDING'},{label:'Total received',value:summary.totalAmountReceived,money:true,icon:'received',tone:'tone-teal',note:`${repaymentRate.toFixed(0)}% RECOVERED`},{label:'Outstanding',value:summary.outstandingPrincipal,money:true,icon:'outstanding',tone:'tone-violet',note:'RECEIVABLE'},{label:'Closed loans',value:summary.closedLoans,icon:'closed',tone:'tone-amber',note:'COMPLETED'}] as Metric[],loanStatus:[{name:'Active',value:summary.activeLoans},{name:'Closed',value:summary.closedLoans},{name:'NPA',value:summary.npaLoans}],amountStatus:[{name:'Active',value:activeAmount},{name:'Closed',value:closedAmount},{name:'NPA',value:npaAmount}],monthlyTrend:this.monthly(loans)};}
-  filteredRecentLoans(loans:Loan[]){const term=this.loanSearch.trim().toLowerCase();return [...loans].sort((a,b)=>String(b.investmentDate).localeCompare(String(a.investmentDate))).slice(0,100).filter(loan=>this.loanFilter==='ALL'||(this.loanFilter==='NPA'?loan.npa:loan.loanStatus===this.loanFilter)).filter(loan=>!term||[loan.loanId,loan.schemeId,loan.borrowerName,loan.loanStatus,loan.comments].some(value=>String(value||'').toLowerCase().includes(term))).sort((a,b)=>{const left=a[this.loanSort]??'',right=b[this.loanSort]??'';const result=typeof left==='number'&&typeof right==='number'?left-right:String(left).localeCompare(String(right));return this.loanSortDirection==='asc'?result:-result;});}
-  recentLoans(loans:Loan[]){const start=(this.loanPage-1)*this.loanPageSize;return this.filteredRecentLoans(loans).slice(start,start+this.loanPageSize);}
-  totalLoanPages(loans:Loan[]){return Math.max(1,Math.ceil(this.filteredRecentLoans(loans).length/this.loanPageSize));}
-  pageStart(loans:Loan[]){return this.filteredRecentLoans(loans).length?(this.loanPage-1)*this.loanPageSize+1:0;}
-  pageEnd(loans:Loan[]){return Math.min(this.loanPage*this.loanPageSize,this.filteredRecentLoans(loans).length);}
+  filteredRecentLoans(loans:Loan[]){return this.loanTableView(loans).filtered;}
+  recentLoans(loans:Loan[]){return this.loanTableView(loans).page;}
+  totalLoanPages(loans:Loan[]){return this.loanTableView(loans).totalPages;}
+  pageStart(loans:Loan[]){return this.loanTableView(loans).start;}
+  pageEnd(loans:Loan[]){return this.loanTableView(loans).end;}
   setLoanFilter(filter:string){this.loanFilter=filter;this.loanPage=1;}
   sortLoans(column:keyof Loan){if(this.loanSort===column)this.loanSortDirection=this.loanSortDirection==='asc'?'desc':'asc';else{this.loanSort=column;this.loanSortDirection='asc';}this.loanPage=1;}
   sortMark(column:keyof Loan){return this.loanSort===column?(this.loanSortDirection==='asc'?'▲':'▼'):'';}
-  investmentTrend(loans:Loan[]){const daily=this.trendWindow==='DAILY';const now=new Date();const periods=Array.from({length:daily?60:12},(_,i)=>{const d=daily?new Date(now.getFullYear(),now.getMonth(),now.getDate()-59+i):new Date(now.getFullYear(),now.getMonth()-11+i,1);return{key:daily?d.toISOString().slice(0,10):`${d.getFullYear()}-${d.getMonth()}`,label:d.toLocaleDateString('en-IN',daily?{day:'2-digit',month:'short'}:{month:'short'})};});const series=(name:string,test:(l:Loan)=>boolean)=>({name,series:periods.map(period=>({name:period.label,value:this.sum(loans.filter(loan=>{const d=new Date(loan.investmentDate);const key=daily?loan.investmentDate:`${d.getFullYear()}-${d.getMonth()}`;return key===period.key&&test(loan);}),loan=>loan.investedAmount)}))});return[series('Total',()=>true),series('Active',loan=>loan.loanStatus==='ACTIVE'),series('Closed',loan=>loan.loanStatus==='CLOSED'),series('NPA',loan=>loan.npa)];}
+  investmentTrend(loans:Loan[]){
+    if(this.trendCache?.loans===loans&&this.trendCache.window===this.trendWindow)return this.trendCache.value;
+    const daily=this.trendWindow==='DAILY';
+    const now=new Date();
+    const periods=Array.from({length:daily?60:12},(_,i)=>{const d=daily?new Date(now.getFullYear(),now.getMonth(),now.getDate()-59+i):new Date(now.getFullYear(),now.getMonth()-11+i,1);return{key:daily?this.localDateKey(d):`${d.getFullYear()}-${d.getMonth()}`,label:d.toLocaleDateString('en-IN',daily?{day:'2-digit',month:'short'}:{month:'short'})};});
+    const totals=new Map(periods.map(period=>[period.key,{total:0,active:0,closed:0,npa:0}]));
+    for(const loan of loans){const date=new Date(loan.investmentDate);if(Number.isNaN(date.getTime()))continue;const key=daily?String(loan.investmentDate).slice(0,10):`${date.getFullYear()}-${date.getMonth()}`;const bucket=totals.get(key);if(!bucket)continue;const amount=loan.investedAmount||0;bucket.total+=amount;if(loan.loanStatus==='ACTIVE')bucket.active+=amount;if(loan.loanStatus==='CLOSED')bucket.closed+=amount;if(loan.npa)bucket.npa+=amount;}
+    const series=(name:string,key:'total'|'active'|'closed'|'npa')=>({name,series:periods.map(period=>({name:period.label,value:totals.get(period.key)![key]}))});
+    const value=[series('Total','total'),series('Active','active'),series('Closed','closed'),series('NPA','npa')];
+    this.trendCache={loans,window:this.trendWindow,value};
+    return value;
+  }
+  private loanTableView(loans:Loan[]):LoanTableView{
+    const search=this.loanSearch.trim().toLowerCase();
+    const cached=this.tableCache;
+    if(cached&&cached.loans===loans&&cached.filter===this.loanFilter&&cached.search===search&&cached.page===this.loanPage&&cached.pageSize===this.loanPageSize&&cached.sort===this.loanSort&&cached.direction===this.loanSortDirection)return cached.view;
+    const filtered=[...loans].sort((a,b)=>String(b.investmentDate).localeCompare(String(a.investmentDate))).slice(0,100).filter(loan=>this.loanFilter==='ALL'||(this.loanFilter==='NPA'?loan.npa:loan.loanStatus===this.loanFilter)).filter(loan=>!search||[loan.loanId,loan.schemeId,loan.borrowerName,loan.loanStatus,loan.comments].some(value=>String(value||'').toLowerCase().includes(search))).sort((a,b)=>{const left=a[this.loanSort]??'',right=b[this.loanSort]??'';const result=typeof left==='number'&&typeof right==='number'?left-right:String(left).localeCompare(String(right));return this.loanSortDirection==='asc'?result:-result;});
+    const totalPages=Math.max(1,Math.ceil(filtered.length/this.loanPageSize));
+    const page=Math.min(this.loanPage,totalPages);
+    const startIndex=(page-1)*this.loanPageSize;
+    const view={filtered,page:filtered.slice(startIndex,startIndex+this.loanPageSize),totalPages,start:filtered.length?startIndex+1:0,end:Math.min(startIndex+this.loanPageSize,filtered.length)};
+    this.tableCache={loans,filter:this.loanFilter,search,page:this.loanPage,pageSize:this.loanPageSize,sort:this.loanSort,direction:this.loanSortDirection,view};
+    return view;
+  }
+  private localDateKey(date:Date){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;}
   private monthly(loans:Loan[]){const now=new Date();const months=Array.from({length:12},(_,i)=>{const d=new Date(now.getFullYear(),now.getMonth()-11+i,1);return{key:`${d.getFullYear()}-${d.getMonth()}`,label:d.toLocaleDateString('en-IN',{month:'short'})};});const series=(name:string,test:(l:Loan)=>boolean)=>({name,series:months.map(m=>({name:m.label,value:loans.filter(l=>{const d=new Date(l.investmentDate);return test(l)&&`${d.getFullYear()}-${d.getMonth()}`===m.key;}).length}))});return[series('Total',()=>true),series('Active',l=>l.loanStatus==='ACTIVE'),series('Closed',l=>l.loanStatus==='CLOSED')];}
   private sum(items:Loan[],pick:(l:Loan)=>number){return items.reduce((total,item)=>total+(pick(item)||0),0);}
   statusColor(name:string){return name==='Active'?'#27bf91':name==='Closed'?'#9b69dd':'#ed5c68';}
